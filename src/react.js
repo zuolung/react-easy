@@ -1,69 +1,95 @@
 const RENDER_TO_DOM = Symbol("RENDER_DOM");
 
-class EleWrapper {
-  constructor(type) {
-    this.root = document.createElement(type);
-  }
-  setAttribute(name, value) {
-    if (name.match(/^on([\s\S]+)$/)) {
-      const eventName = RegExp.$1.replace(/^[\s\S]/, s => s.toLocaleLowerCase())
-      this.root.addEventListener(eventName, value);
-    }
-    if (name === "className") name = "class";
-    this.root.setAttribute(name, value)
-  }
-  appendChild(vChild) {
-    let range = document.createRange();
-    range.setStart(this.root, this.root.childNodes.length);
-    range.setEnd(this.root, this.root.childNodes.length);
-    vChild[RENDER_TO_DOM](range);
-  }
-  [RENDER_TO_DOM](range) {
-    range.deleteContents();
-    range.insertNode(this.root);
-  }
-
-}
-
-class TextWrapper {
-  constructor(content) {
-    this.root = document.createTextNode(content);
-  }
-  [RENDER_TO_DOM](range) {
-    range.deleteContents();
-    range.insertNode(this.root);
-  }
-}
-
 class Component {
   constructor() {
     this.children = [];
     this.props = Object.create(null);
+    this.range = null;
+    this.root = null;
   }
 
-  [RENDER_TO_DOM](range) {
-    this.range = range;
-    this.render()[RENDER_TO_DOM](range)
+  setAttribute(name, value) {
+    this.props[name] = value;
   }
 
-  reRender() {
-    let oldRange = this.range;
-
-    let range = document.createRange();
-    range.setStart(oldRange.startContainer, oldRange.startOffset);
-    range.setEnd(oldRange.startContainer, oldRange.startOffset);
-    this[RENDER_TO_DOM](range);
-
-    oldRange.setStart(range.endContainer, range.endOffset)
-    oldRange.deleteContents();
+  get vDom() {
+    return this.render().vDom;
   }
 
   appendChild(vChild) {
     this.children.push(vChild);
   }
 
+  [RENDER_TO_DOM](range) {
+    this.range = range;
+    this._range = range;
+    this._vDom = this.vDom;
+    this._vDom[RENDER_TO_DOM](range)
+  }
+
+  update() {
+    let isSameNode = (oldNode, newNode) => {
+      if (oldNode.type !== newNode.type) {
+        return false;
+      }
+      for (let name in newNode.type) {
+        if (newNode.props[name] !== oldNode.props[name]) {
+          return false;
+        }
+      }
+      if (Object.keys(newNode.props).length !== Object.keys(oldNode.props).length) {
+        return false;
+      }
+      if (newNode.type === "#text") {
+        if (newNode.content !== oldNode.content) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    let update = (oldNode, newNode) => {
+      if (!isSameNode(oldNode, newNode)) {
+        return newNode[RENDER_TO_DOM](oldNode.range);
+      }
+      newNode.range = oldNode.range;
+
+      let newChildren = newNode.vChildren;
+      let oldChildren = oldNode.vChildren;
+
+      if (!newChildren || !newChildren.length) {
+        return;
+      }
+
+      var tailRange = oldChildren[oldChildren.length - 1].range;
+
+      for (let i = 0; i < newChildren.length; i++) {
+        let newChild = newChildren[i];
+        let oldChild = oldChildren[i];
+        if (i < oldChildren.length) {
+          update(oldChild, newChild);
+        } else {
+          var range = document.createRange();
+          range.setStart(tailRange.endContainer, tailRange.endOffset);
+          range.setEnd(tailRange.endContainer, tailRange.endOffset);
+          newChild[RENDER_TO_DOM](range);
+          tailRange = range;
+        }
+      }
+
+    }
+    let vDom = this.vDom;
+    update(this._vDom, vDom);
+    this._vDom = vDom;
+  }
+
   setState(nextState) {
-    console.log(nextState)
+    if (this.state === null || typeof this.state !== "object") {
+      this.state = newState;
+      return this.update();
+    }
+
+
     let merge = (oldS, newS) => {
       for (let p in newS) {
         if (typeof newS[p] === "object") {
@@ -76,19 +102,85 @@ class Component {
         }
       }
     }
-    if (!this.state && nextState) {
-      this.state = {};
-    }
+    // if (!this.state && nextState) {
+    //   this.state = {};
+    // }
     merge(this.state, nextState);
-    this.reRender();
+    this.update();
   }
 
-  setAttribute(name, value) {
-    this[name] = value;
-    this.props[name] = value;
+}
+
+class EleWrapper extends Component {
+  constructor(type) {
+    super(type);
+    this.type = type;
   }
 
+  [RENDER_TO_DOM](range) {
+    this.range = range;
+    this._range = range;
 
+    let root = document.createElement(this.type);
+
+    for (let name in this.props) {
+      let value = this.props[name];
+      if (name.match(/^on([\s\S]+)$/)) {
+        const eventName = RegExp.$1.replace(/^[\s\S]/, s => s.toLocaleLowerCase())
+        root.addEventListener(eventName, value);
+      } else {
+        if (name === "className") name = "class";
+        root.setAttribute(name, value)
+      }
+    }
+
+    if (!this.vChildren) {
+      this.vChildren = this.children.map(child => child.vDom);
+    }
+
+    for (let child of this.children) {
+      let childRange = document.createRange();
+      childRange.setStart(root, root.childNodes.length);
+      childRange.setEnd(root, root.childNodes.length);
+      child[RENDER_TO_DOM](childRange);
+    }
+
+
+    replaceRange(range, root);
+  }
+  get vDom() {
+    this.vChildren = this.children.map(child => child.vDom)
+    return this;
+  }
+}
+
+class TextWrapper extends Component {
+  constructor(content) {
+    super(content);
+    this.type = '#text';
+    this.content = content;
+  }
+  [RENDER_TO_DOM](range) {
+    this.range = range;
+    this._range = range;
+
+    var root = document.createTextNode(this.content);
+    replaceRange(range, root);
+
+  }
+
+  get vDom() {
+    return this;
+  }
+}
+
+function replaceRange(range, node) {
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.deleteContents();
+
+  range.setStartBefore(node);
+  range.setStartAfter(node);
 }
 
 export const React = {
@@ -108,19 +200,15 @@ export const React = {
     let insertChilren = (children) => {
       if (children && children.length) {
         for (let child of children) {
+          if (typeof child === "string") {
+            child = new TextWrapper(child);
+          }
+          if (child === null) {
+            continue;
+          }
           if (typeof child === "object" && child instanceof Array) {
             insertChilren(child);
           } else {
-            if (
-              !(child instanceof Component) &&
-              !(child instanceof EleWrapper) &&
-              !child instanceof TextWrapper
-            ) {
-              child = String(child);
-            }
-            if (typeof child === "string") {
-              child = new TextWrapper(child);
-            }
             ele.appendChild(child);
           }
         }
